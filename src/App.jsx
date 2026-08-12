@@ -345,13 +345,38 @@ function MapView({
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
-
   const values = hexes.map((h) => h.potentialTaxiUsers);
   const thresholds = useMemo(() => quantileThresholds(values), [hexes]);
 
-  // Jakarta-area geographic extent. Hex coordinates are mapped into this
-  // extent so the analytical grid sits directly over the OSM basemap.
-  const GEO = { west: 106.62, east: 107.08, north: -6.05, south: -6.48 };
+  // Central Jakarta is the geographic anchor for the analytical grid.
+  // Both the OSM tiles and the hexagons below use the SAME Web Mercator
+  // world-pixel coordinate system, so panning and zooming cannot make
+  // the analytical layer drift relative to the basemap.
+  const MAP_CENTER = { lat: -6.1944, lon: 106.8229 };
+  const TILE_ZOOM = 12;
+  const TILE_SIZE = 256;
+  const WORLD_SIZE = TILE_SIZE * Math.pow(2, TILE_ZOOM);
+  const HEX_LON_SCALE = 0.00108;
+  const HEX_LAT_SCALE = 0.00108;
+  const HEX_RADIUS_UNITS = 15.4;
+
+  const lonToWorldX = useCallback((lon) => ((lon + 180) / 360) * WORLD_SIZE, [WORLD_SIZE]);
+  const latToWorldY = useCallback((lat) => {
+    const rad = (lat * Math.PI) / 180;
+    const merc = Math.log(Math.tan(Math.PI / 4 + rad / 2));
+    return (0.5 - merc / (2 * Math.PI)) * WORLD_SIZE;
+  }, [WORLD_SIZE]);
+
+  const centerWorld = useMemo(() => ({
+    x: lonToWorldX(MAP_CENTER.lon),
+    y: latToWorldY(MAP_CENTER.lat),
+  }), [lonToWorldX, latToWorldY]);
+
+  const geoHexes = useMemo(() => hexes.map((hx) => {
+    const lon = MAP_CENTER.lon + hx.x * HEX_LON_SCALE;
+    const lat = MAP_CENTER.lat - hx.y * HEX_LAT_SCALE;
+    return { ...hx, lat, lon, worldX: lonToWorldX(lon), worldY: latToWorldY(lat) };
+  }), [hexes, lonToWorldX, latToWorldY]);
 
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -370,96 +395,70 @@ function MapView({
   };
 
   const onMouseUp = () => { dragRef.current = null; };
-
   const zoomIn = () => setView((v) => ({ ...v, scale: clamp(v.scale * 1.25, 0.7, 3.5) }));
   const zoomOut = () => setView((v) => ({ ...v, scale: clamp(v.scale / 1.25, 0.7, 3.5) }));
   const reset = () => setView({ scale: 1, tx: 0, ty: 0 });
 
-  const w = bounds.maxX - bounds.minX, h2 = bounds.maxY - bounds.minY;
-  const vb = `${bounds.minX} ${bounds.minY} ${w} ${h2}`;
-  const hovered = hexes.find((x) => x.id === hoveredId);
+  const containerWidth = containerRef.current?.clientWidth || 520;
+  const containerHeight = containerRef.current?.clientHeight || containerWidth;
+  const mapSize = Math.min(containerWidth, containerHeight);
 
-  // Keep the basemap and SVG in exactly the same local coordinate system.
-  // OSM is displayed as a tile mosaic underneath; the analytical SVG is
-  // projected over the same Jakarta bounding box.
-  const tileZoom = 11;
-  const tileSize = 256;
-
-  const lon2x = (lon) => ((lon - GEO.west) / (GEO.east - GEO.west)) * w + bounds.minX;
-  const lat2y = (lat) => ((GEO.north - lat) / (GEO.north - GEO.south)) * h2 + bounds.minY;
-
-  // Web Mercator tile conversion for a lightweight OSM tile mosaic.
-  const lonToWorldX = (lon, z) => ((lon + 180) / 360) * Math.pow(2, z) * tileSize;
-  const latToWorldY = (lat, z) => {
-    const rad = (lat * Math.PI) / 180;
-    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, z) * tileSize;
-  };
-
-  const centerLon = (GEO.west + GEO.east) / 2;
-  const centerLat = (GEO.north + GEO.south) / 2;
-  const centerWX = lonToWorldX(centerLon, tileZoom);
-  const centerWY = latToWorldY(centerLat, tileZoom);
-
-  const tileSpan = Math.max(w, h2) * 1.35;
-  const tileWorldW = tileSpan * 1.15;
-  const tileWorldH = tileSpan * 1.15;
-  const startWX = centerWX - tileWorldW / 2;
-  const startWY = centerWY - tileWorldH / 2;
-  const endWX = centerWX + tileWorldW / 2;
-  const endWY = centerWY + tileWorldH / 2;
-  const minTX = Math.floor(startWX / tileSize) - 1;
-  const maxTX = Math.ceil(endWX / tileSize) + 1;
-  const minTY = Math.floor(startWY / tileSize) - 1;
-  const maxTY = Math.ceil(endWY / tileSize) + 1;
+  // Render enough OSM tiles around the Central Jakarta viewport. Tiles and
+  // polygons share the same transformed world-pixel layer.
+  const tileRadius = Math.ceil((mapSize / view.scale) / TILE_SIZE / 2) + 2;
+  const centerTileX = Math.floor(centerWorld.x / TILE_SIZE);
+  const centerTileY = Math.floor(centerWorld.y / TILE_SIZE);
   const tiles = [];
-
-  for (let tx = minTX; tx <= maxTX; tx++) {
-    for (let ty = minTY; ty <= maxTY; ty++) {
-      const n = Math.pow(2, tileZoom);
-      const wrappedX = ((tx % n) + n) % n;
+  const tileCount = Math.pow(2, TILE_ZOOM);
+  for (let dx = -tileRadius; dx <= tileRadius; dx++) {
+    for (let dy = -tileRadius; dy <= tileRadius; dy++) {
+      const tx = centerTileX + dx;
+      const ty = centerTileY + dy;
+      if (ty < 0 || ty >= tileCount) continue;
+      const wrappedX = ((tx % tileCount) + tileCount) % tileCount;
       tiles.push({
         key: `${tx}-${ty}`,
-        x: (tx * tileSize - centerWX) / w * w + (w / 2),
-        y: (ty * tileSize - centerWY) / h2 * h2 + (h2 / 2),
-        src: `https://tile.openstreetmap.org/${tileZoom}/${wrappedX}/${ty}.png`,
+        left: tx * TILE_SIZE - centerWorld.x,
+        top: ty * TILE_SIZE - centerWorld.y,
+        src: `https://tile.openstreetmap.org/${TILE_ZOOM}/${wrappedX}/${ty}.png`,
       });
     }
   }
 
-  const geoHexes = hexes.map((hx) => {
-    // The existing analytical grid is normalized into the Jakarta geographic
-    // extent. This keeps the user's existing demand model while aligning it
-    // visually with the actual street geography.
-    const gx = ((hx.x - bounds.minX) / w);
-    const gy = ((hx.y - bounds.minY) / h2);
-    return {
-      ...hx,
-      mapX: bounds.minX + gx * w,
-      mapY: bounds.minY + gy * h2,
-    };
-  });
+  const hovered = geoHexes.find((x) => x.id === hoveredId);
+  const makeHexPoints = (hx) => {
+    // Preserve the original analytical hex sizing while translating it into
+    // geographic Web Mercator coordinates around Central Jakarta.
+    const points = [];
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 180) * (60 * i);
+      const lonOffset = Math.cos(angle) * HEX_RADIUS_UNITS * HEX_LON_SCALE;
+      const latOffset = Math.sin(angle) * HEX_RADIUS_UNITS * HEX_LAT_SCALE;
+      const px = lonToWorldX(hx.lon + lonOffset) - centerWorld.x;
+      const py = latToWorldY(hx.lat + latOffset) - centerWorld.y;
+      points.push(`${px},${py}`);
+    }
+    return points.join(" ");
+  };
 
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full overflow-hidden select-none cursor-grab active:cursor-grabbing bg-slate-100"
+      className="relative w-full aspect-square min-h-[460px] overflow-hidden select-none cursor-grab active:cursor-grabbing bg-slate-100"
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
     >
-      {/* OpenStreetMap basemap */}
       <div
         className="absolute inset-0 overflow-hidden"
         style={{ background: "#e8edf2" }}
       >
         <div
-          className="absolute"
+          className="absolute left-1/2 top-1/2"
           style={{
-            left: "50%",
-            top: "50%",
-            width: `${w}px`,
-            height: `${h2}px`,
+            width: `${mapSize}px`,
+            height: `${mapSize}px`,
             transform: `translate(-50%, -50%) translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
             transformOrigin: "center center",
           }}
@@ -472,60 +471,57 @@ function MapView({
               draggable={false}
               className="absolute pointer-events-none"
               style={{
-                left: `${tile.x}px`,
-                top: `${tile.y}px`,
-                width: `${tileSize}px`,
-                height: `${tileSize}px`,
+                left: `${tile.left + mapSize / 2}px`,
+                top: `${tile.top + mapSize / 2}px`,
+                width: `${TILE_SIZE}px`,
+                height: `${TILE_SIZE}px`,
                 opacity: 0.92,
               }}
               onError={(e) => { e.currentTarget.style.display = "none"; }}
             />
           ))}
+
+          {layers.hex && (
+            <svg
+              className="absolute inset-0 w-full h-full overflow-visible"
+              viewBox={`${-mapSize / 2} ${-mapSize / 2} ${mapSize} ${mapSize}`}
+              preserveAspectRatio="none"
+            >
+              {geoHexes.map((hx) => {
+                const bIdx = bucketIndex(hx.potentialTaxiUsers, thresholds);
+                const fill = layers.demand ? DEMAND_COLORS[bIdx] : "#64748b";
+                const isSel = hx.id === selectedId;
+                const isHov = hx.id === hoveredId;
+                return (
+                  <polygon
+                    key={hx.id}
+                    points={makeHexPoints(hx)}
+                    fill={fill}
+                    fillOpacity={layers.demand ? 0.32 : 0.16}
+                    stroke={isSel ? "#0f172a" : isHov ? "#f59e0b" : "#ffffff"}
+                    strokeOpacity={isSel ? 0.95 : 0.58}
+                    strokeWidth={isSel ? 2.5 : isHov ? 1.8 : 0.8}
+                    vectorEffect="non-scaling-stroke"
+                    onMouseEnter={() => setHoveredId(hx.id)}
+                    onMouseLeave={() => setHoveredId(null)}
+                    onClick={() => onSelect(hx.id)}
+                    style={{ cursor: "pointer" }}
+                  />
+                );
+              })}
+            </svg>
+          )}
         </div>
         <div className="absolute inset-0 bg-white/10 pointer-events-none" />
       </div>
 
-      {/* Hexagonal demand overlay */}
-      <svg
-        viewBox={vb}
-        className="absolute inset-0 w-full h-full pointer-events-none"
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <g
-          transform={`translate(${view.tx} ${view.ty}) scale(${view.scale})`}
-          className="pointer-events-auto"
-        >
-          {layers.hex && geoHexes.map((hx) => {
-            const bIdx = bucketIndex(hx.potentialTaxiUsers, thresholds);
-            const fill = layers.demand ? DEMAND_COLORS[bIdx] : "#64748b";
-            const isSel = hx.id === selectedId;
-            const isHov = hx.id === hoveredId;
-            return (
-              <polygon
-                key={hx.id}
-                points={hexPoints(hx.mapX, hx.mapY, 15.4)}
-                fill={fill}
-                fillOpacity={layers.demand ? 0.32 : 0.16}
-                stroke={isSel ? "#0f172a" : isHov ? "#f59e0b" : "#ffffff"}
-                strokeOpacity={isSel ? 0.95 : 0.58}
-                strokeWidth={isSel ? 2 : isHov ? 1.6 : 0.8}
-                onMouseEnter={() => setHoveredId(hx.id)}
-                onMouseLeave={() => setHoveredId(null)}
-                onClick={() => onSelect(hx.id)}
-                style={{ cursor: "pointer", transition: "fill-opacity 120ms" }}
-              />
-            );
-          })}
-        </g>
-      </svg>
-
       {hovered && (
         <div
-          className="absolute pointer-events-none bg-white/95 border border-slate-700 rounded-md px-3 py-2 text-[11px] text-slate-100 shadow-xl z-20"
-          style={{ left: Math.min(tooltipPos.x + 14, 10000), top: tooltipPos.y + 14, minWidth: 170 }}
+          className="absolute pointer-events-none bg-white/95 border border-slate-300 rounded-md px-3 py-2 text-[11px] text-slate-700 shadow-xl z-20"
+          style={{ left: Math.min(tooltipPos.x + 14, Math.max(tooltipPos.x + 14, mapSize - 210)), top: Math.min(tooltipPos.y + 14, mapSize - 105), minWidth: 170 }}
         >
           <div className="text-slate-500 mb-0.5">{hovered.district}</div>
-          <div className="font-semibold text-white mb-1.5">{hovered.id}</div>
+          <div className="font-semibold text-slate-800 mb-1.5">{hovered.id}</div>
           <div className="flex justify-between gap-4"><span className="text-slate-500">Potential Taxi Users</span><span className="tabular-nums font-medium">{formatInt(hovered.potentialTaxiUsers)}</span></div>
           <div className="flex justify-between gap-4"><span className="text-slate-500">Demand Index</span><span className="tabular-nums font-medium">{hovered.demandIndex}</span></div>
           <div className="flex justify-between gap-4"><span className="text-slate-500">Taxi Probability</span><span className="tabular-nums font-medium">{formatPct(hovered.taxiProbability * 100)}</span></div>
@@ -538,22 +534,22 @@ function MapView({
         <button onClick={reset} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50"><RotateCcw size={13} /></button>
       </div>
 
-      <div className="absolute bottom-3 left-3 bg-white/95 border border-slate-200 rounded-md px-3 py-2.5 z-10 shadow-sm">
-        <div className="text-[10px] uppercase tracking-wider text-slate-9000 font-semibold mb-1.5">Estimated Potential Taxi Users</div>
-        <div className="flex items-center gap-2.5">
+      <div className="absolute bottom-3 left-3 bg-white/95 border border-slate-200 rounded-md px-2.5 py-2 z-10 shadow-sm">
+        <div className="text-[9px] uppercase tracking-wider text-slate-700 font-semibold mb-1.5">Est. Potential Taxi Users</div>
+        <div className="flex items-center gap-2">
           {DEMAND_COLORS.map((c, i) => (
-            <div key={c} className="flex flex-col items-center gap-1">
-              <div className="w-5 h-3 rounded-[1px]" style={{ backgroundColor: c, opacity: 0.52 }} />
-              <span className="text-[9px] text-slate-9000 tabular-nums whitespace-nowrap">
+            <div key={c} className="flex flex-col items-center gap-0.5">
+              <div className="w-4 h-2.5 rounded-[1px]" style={{ backgroundColor: c, opacity: 0.52 }} />
+              <span className="text-[8px] text-slate-600 tabular-nums whitespace-nowrap">
                 {i === 0 ? `<${formatInt(thresholds[1])}` : i === 4 ? `>${formatInt(thresholds[4])}` : `${formatInt(thresholds[i])}–${formatInt(thresholds[i + 1])}`}
               </span>
             </div>
           ))}
         </div>
-        <div className="text-[9px] text-slate-500 mt-1.5">Hexagons are semi-transparent to preserve street context.</div>
+        <div className="text-[8px] text-slate-500 mt-1">Semi-transparent hexagons preserve street context.</div>
       </div>
 
-      <div className="absolute bottom-3 right-3 bg-white/90 border border-slate-200 rounded px-2 py-1 text-[9px] text-slate-9000 z-10">
+      <div className="absolute bottom-3 right-3 bg-white/90 border border-slate-200 rounded px-2 py-1 text-[9px] text-slate-600 z-10">
         © OpenStreetMap contributors
       </div>
     </div>
@@ -1122,7 +1118,7 @@ export default function DeltaMobility() {
                 )}
               </div>
 
-              <Panel className="flex-1 min-h-0 flex flex-col p-0 overflow-hidden">
+              <Panel className="shrink-0 flex flex-col p-0 overflow-hidden">
                 <MapControlBar layers={layers} setLayers={setLayers} mapStyle={mapStyle} setMapStyle={setMapStyle} onSearch={handleSearch} />
                 <div className="flex-1 min-h-0">
                   <MapView
