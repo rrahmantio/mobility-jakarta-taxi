@@ -341,7 +341,7 @@ function DistBar({ rows, compareRows, unit = "%" }) {
    ============================================================ */
 function MapView({
   hexes, selectedId, onSelect, hoveredId, setHoveredId, layers,
-  view, setView, tooltipPos, setTooltipPos,
+  view, setView, tooltipPos, setTooltipPos, bounds,
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
