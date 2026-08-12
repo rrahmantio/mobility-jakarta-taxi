@@ -836,7 +836,7 @@ function MobilityTab({ hex, cityAvg }) {
   const drivers = computeDrivers(hex, cityAvg);
 
   return (
-    <div className="p-4 grid grid-cols-3 gap-3 overflow-y-auto">
+    <div className="h-full min-h-0 p-4 grid grid-cols-3 gap-3 overflow-y-auto">
       <div className="col-span-3 grid grid-cols-6 gap-3">
         <KPICard label="Avg. Taxi Waiting Time" value={formatMin(hex.waitTime)} sub={`Jakarta avg: ${formatMin(cityAvg.waitTime)}`} icon={Clock} />
         <KPICard label="Avg. Home Distance" value={formatKm(hex.homeDistance)} sub={`Jakarta avg: ${formatKm(cityAvg.homeDistance)}`} icon={Navigation} />
@@ -913,7 +913,7 @@ function DemographicsTab({ hex, cityAvg }) {
   const socioPropensity = ["A", "B", "C"].map((k) => ({ segment: k, value: clamp(Math.round(SOCIO_BASE_PROPENSITY[k] * ratio * 10) / 10, 3, 45) }));
 
   return (
-    <div className="p-4 grid grid-cols-3 gap-3 overflow-y-auto">
+    <div className="h-full min-h-0 p-4 grid grid-cols-3 gap-3 overflow-y-auto">
       <div className="col-span-3 grid grid-cols-3 gap-3">
         <KPICard label="Estimated Population" value={formatInt(hex.population)} sub="Area-level aggregate estimate" icon={Users} />
         <KPICard label="Estimated Working Population" value={formatInt(hex.workingPopulation)} sub={`${Math.round((hex.workingPopulation / hex.population) * 100)}% of population`} icon={Building2} />
@@ -1132,7 +1132,7 @@ export default function DeltaMobility() {
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(560px,0.92fr)] gap-4 p-4 h-full min-h-0">
             <div className="min-w-0 min-h-0 flex">
               <Panel className="flex-1 min-h-0 flex flex-col p-0 overflow-hidden">
-                <div className="flex-1 min-h-0">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   <MapView
                     hexes={liveHexes}
                     selectedId={selectedId}
