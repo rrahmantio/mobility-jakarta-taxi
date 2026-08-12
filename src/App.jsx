@@ -420,7 +420,7 @@ function MapView({
     const gy = (hx.y - bounds.minY) / (bounds.maxY - bounds.minY);
     const lon = GEO.west + gx * (GEO.east - GEO.west);
     const lat = GEO.north + gy * (GEO.south - GEO.north);
-    return lat >= coastlineLat(lon);
+    return lat <= coastlineLat(lon);
   };
 
   const onMouseDown = (e) => {
