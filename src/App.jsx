@@ -1222,8 +1222,8 @@ export default function DeltaMobility() {
           <footer className="px-5 py-1.5 border-t border-slate-200 bg-white text-[9.5px] text-slate-500 shrink-0">
             Data note: mobility, demographic, and taxi demand figures shown in this demo are simulated for demonstration purposes and do not represent actual individual-level mobility data.
           </footer>
-          </div>
-        </main>
+          </main>
+        </div>
       </div>
     </div>
   );
