@@ -339,83 +339,19 @@ function DistBar({ rows, compareRows, unit = "%" }) {
 /* ============================================================
    MAP COMPONENT
    ============================================================ */
-function pointInPolygon(point, polygon) {
-  const [x, y] = point;
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const [xi, yi] = polygon[i], [xj, yj] = polygon[j];
-    const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-12) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-const JAKARTA_MAINLAND_MASK = [
-  [106.675, -6.105], [106.710, -6.070], [106.755, -6.055], [106.805, -6.060],
-  [106.850, -6.055], [106.900, -6.070], [106.945, -6.085], [106.975, -6.115],
-  [106.985, -6.155], [106.995, -6.205], [106.985, -6.250], [106.975, -6.295],
-  [106.945, -6.325], [106.900, -6.345], [106.850, -6.365], [106.800, -6.370],
-  [106.755, -6.355], [106.715, -6.330], [106.690, -6.295], [106.680, -6.250],
-  [106.670, -6.205], [106.675, -6.155]
-];
-
 function MapView({
   hexes, selectedId, onSelect, hoveredId, setHoveredId, layers,
-  view, setView, tooltipPos, setTooltipPos,
+  bounds, view, setView, tooltipPos, setTooltipPos,
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
+
   const values = hexes.map((h) => h.potentialTaxiUsers);
-  const thresholds = useMemo(() => quantileThresholds(values), [values]);
-  const hovered = hexes.find((x) => x.id === hoveredId);
+  const thresholds = useMemo(() => quantileThresholds(values), [hexes]);
 
-  // Central Jakarta anchor. Both the OSM tiles and the hexagon overlay are
-  // rendered in the same Web-Mercator pixel coordinate system, so panning
-  // and zooming always move them as one layer.
-  const TILE_ZOOM = 12;
-  const TILE_SIZE = 256;
-  const WORLD_SIZE = TILE_SIZE * (2 ** TILE_ZOOM);
-  const CENTER_LON = 106.8229;
-  const CENTER_LAT = -6.1944;
-  const MAP_W = 5000;
-  const MAP_H = 5000;
-  const MAP_CX = MAP_W / 2;
-  const MAP_CY = MAP_H / 2;
-
-  const lonToWorldX = (lon) => ((lon + 180) / 360) * WORLD_SIZE;
-  const latToWorldY = (lat) => {
-    const rad = (lat * Math.PI) / 180;
-    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * WORLD_SIZE;
-  };
-
-  const centerWX = lonToWorldX(CENTER_LON);
-  const centerWY = latToWorldY(CENTER_LAT);
-
-  // The synthetic mobility grid is deliberately scaled to a realistic
-  // Jakarta footprint (~30–35 km), then projected into the same map space.
-  // 2 map-pixels per synthetic coordinate unit keeps hexes compact.
-  const GEO_SCALE = 2.0;
-  const HEX_SIZE = 29;
-
-  const localWorldX = (worldX) => MAP_CX + (worldX - centerWX);
-  const localWorldY = (worldY) => MAP_CY + (worldY - centerWY);
-
-  const worldPxPerDegree = WORLD_SIZE / 360;
-  const worldYToLat = (worldY) => {
-    const n = Math.PI - (2 * Math.PI * worldY) / WORLD_SIZE;
-    return (180 / Math.PI) * Math.atan(Math.sinh(n));
-  };
-  const hexesWithGeo = hexes
-    .map((hx) => {
-      const mapX = MAP_CX + hx.x * GEO_SCALE;
-      const mapY = MAP_CY + hx.y * GEO_SCALE;
-      const worldX = centerWX + hx.x * GEO_SCALE;
-      const worldY = centerWY + hx.y * GEO_SCALE;
-      const lon = CENTER_LON + (worldX - centerWX) / worldPxPerDegree;
-      const lat = worldYToLat(worldY);
-      return { ...hx, mapX, mapY, lon, lat };
-    })
-    .filter((hx) => pointInPolygon([hx.lon, hx.lat], JAKARTA_MAINLAND_MASK));
+  // Jakarta-area geographic extent. Hex coordinates are mapped into this
+  // extent so the analytical grid sits directly over the OSM basemap.
+  const GEO = { west: 106.62, east: 107.08, north: -6.05, south: -6.48 };
 
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -432,34 +368,76 @@ function MapView({
       setView((v) => ({ ...v, tx: dragRef.current.tx + dx, ty: dragRef.current.ty + dy }));
     }
   };
+
   const onMouseUp = () => { dragRef.current = null; };
-  const zoomIn = () => setView((v) => ({ ...v, scale: clamp(v.scale * 1.2, 0.75, 3) }));
-  const zoomOut = () => setView((v) => ({ ...v, scale: clamp(v.scale / 1.2, 0.75, 3) }));
+
+  const zoomIn = () => setView((v) => ({ ...v, scale: clamp(v.scale * 1.25, 0.7, 3.5) }));
+  const zoomOut = () => setView((v) => ({ ...v, scale: clamp(v.scale / 1.25, 0.7, 3.5) }));
   const reset = () => setView({ scale: 1, tx: 0, ty: 0 });
 
-  // Build a tile mosaic in the exact same 5000x5000 coordinate space as SVG.
-  const tileMinX = centerWX - MAP_W / 2;
-  const tileMaxX = centerWX + MAP_W / 2;
-  const tileMinY = centerWY - MAP_H / 2;
-  const tileMaxY = centerWY + MAP_H / 2;
-  const minTX = Math.floor(tileMinX / TILE_SIZE) - 1;
-  const maxTX = Math.ceil(tileMaxX / TILE_SIZE) + 1;
-  const minTY = Math.floor(tileMinY / TILE_SIZE) - 1;
-  const maxTY = Math.ceil(tileMaxY / TILE_SIZE) + 1;
+  const w = bounds.maxX - bounds.minX, h2 = bounds.maxY - bounds.minY;
+  const vb = `${bounds.minX} ${bounds.minY} ${w} ${h2}`;
+  const hovered = hexes.find((x) => x.id === hoveredId);
+
+  // Keep the basemap and SVG in exactly the same local coordinate system.
+  // OSM is displayed as a tile mosaic underneath; the analytical SVG is
+  // projected over the same Jakarta bounding box.
+  const tileZoom = 11;
+  const tileSize = 256;
+
+  const lon2x = (lon) => ((lon - GEO.west) / (GEO.east - GEO.west)) * w + bounds.minX;
+  const lat2y = (lat) => ((GEO.north - lat) / (GEO.north - GEO.south)) * h2 + bounds.minY;
+
+  // Web Mercator tile conversion for a lightweight OSM tile mosaic.
+  const lonToWorldX = (lon, z) => ((lon + 180) / 360) * Math.pow(2, z) * tileSize;
+  const latToWorldY = (lat, z) => {
+    const rad = (lat * Math.PI) / 180;
+    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, z) * tileSize;
+  };
+
+  const centerLon = (GEO.west + GEO.east) / 2;
+  const centerLat = (GEO.north + GEO.south) / 2;
+  const centerWX = lonToWorldX(centerLon, tileZoom);
+  const centerWY = latToWorldY(centerLat, tileZoom);
+
+  const tileSpan = Math.max(w, h2) * 1.35;
+  const tileWorldW = tileSpan * 1.15;
+  const tileWorldH = tileSpan * 1.15;
+  const startWX = centerWX - tileWorldW / 2;
+  const startWY = centerWY - tileWorldH / 2;
+  const endWX = centerWX + tileWorldW / 2;
+  const endWY = centerWY + tileWorldH / 2;
+  const minTX = Math.floor(startWX / tileSize) - 1;
+  const maxTX = Math.ceil(endWX / tileSize) + 1;
+  const minTY = Math.floor(startWY / tileSize) - 1;
+  const maxTY = Math.ceil(endWY / tileSize) + 1;
   const tiles = [];
-  const tileCount = 2 ** TILE_ZOOM;
+
   for (let tx = minTX; tx <= maxTX; tx++) {
     for (let ty = minTY; ty <= maxTY; ty++) {
-      if (ty < 0 || ty >= tileCount) continue;
-      const wrappedX = ((tx % tileCount) + tileCount) % tileCount;
+      const n = Math.pow(2, tileZoom);
+      const wrappedX = ((tx % n) + n) % n;
       tiles.push({
         key: `${tx}-${ty}`,
-        x: MAP_CX + tx * TILE_SIZE - centerWX,
-        y: MAP_CY + ty * TILE_SIZE - centerWY,
-        src: `https://tile.openstreetmap.org/${TILE_ZOOM}/${wrappedX}/${ty}.png`,
+        x: (tx * tileSize - centerWX) / w * w + (w / 2),
+        y: (ty * tileSize - centerWY) / h2 * h2 + (h2 / 2),
+        src: `https://tile.openstreetmap.org/${tileZoom}/${wrappedX}/${ty}.png`,
       });
     }
   }
+
+  const geoHexes = hexes.map((hx) => {
+    // The existing analytical grid is normalized into the Jakarta geographic
+    // extent. This keeps the user's existing demand model while aligning it
+    // visually with the actual street geography.
+    const gx = ((hx.x - bounds.minX) / w);
+    const gy = ((hx.y - bounds.minY) / h2);
+    return {
+      ...hx,
+      mapX: bounds.minX + gx * w,
+      mapY: bounds.minY + gy * h2,
+    };
+  });
 
   return (
     <div
@@ -470,16 +448,22 @@ function MapView({
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
     >
+      {/* OpenStreetMap basemap */}
       <div
-        className="absolute"
-        style={{
-          left: "50%", top: "50%", width: MAP_W, height: MAP_H,
-          transform: `translate(-50%, -50%) translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
-          transformOrigin: "center center",
-        }}
+        className="absolute inset-0 overflow-hidden"
+        style={{ background: "#e8edf2" }}
       >
-        {/* OSM basemap and analytical overlay are siblings inside ONE transform. */}
-        <div className="absolute inset-0 overflow-hidden bg-slate-100">
+        <div
+          className="absolute"
+          style={{
+            left: "50%",
+            top: "50%",
+            width: `${w}px`,
+            height: `${h2}px`,
+            transform: `translate(-50%, -50%) translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
+            transformOrigin: "center center",
+          }}
+        >
           {tiles.map((tile) => (
             <img
               key={tile.key}
@@ -487,15 +471,31 @@ function MapView({
               alt=""
               draggable={false}
               className="absolute pointer-events-none"
-              style={{ left: tile.x, top: tile.y, width: TILE_SIZE, height: TILE_SIZE, opacity: 0.92 }}
+              style={{
+                left: `${tile.x}px`,
+                top: `${tile.y}px`,
+                width: `${tileSize}px`,
+                height: `${tileSize}px`,
+                opacity: 0.92,
+              }}
               onError={(e) => { e.currentTarget.style.display = "none"; }}
             />
           ))}
-          <div className="absolute inset-0 bg-white/10 pointer-events-none" />
         </div>
+        <div className="absolute inset-0 bg-white/10 pointer-events-none" />
+      </div>
 
-        <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
-          {layers.hex && hexesWithGeo.map((hx) => {
+      {/* Hexagonal demand overlay */}
+      <svg
+        viewBox={vb}
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <g
+          transform={`translate(${view.tx} ${view.ty + 147}) scale(${view.scale})`}
+          className="pointer-events-auto"
+        >
+          {layers.hex && geoHexes.map((hx) => {
             const bIdx = bucketIndex(hx.potentialTaxiUsers, thresholds);
             const fill = layers.demand ? DEMAND_COLORS[bIdx] : "#64748b";
             const isSel = hx.id === selectedId;
@@ -503,57 +503,57 @@ function MapView({
             return (
               <polygon
                 key={hx.id}
-                points={hexPoints(hx.mapX, hx.mapY, HEX_SIZE)}
+                points={hexPoints(hx.mapX, hx.mapY, 13.09)}
                 fill={fill}
-                fillOpacity={layers.demand ? 0.34 : 0.16}
-                stroke={isSel ? "#111827" : isHov ? "#f59e0b" : "#ffffff"}
-                strokeOpacity={isSel ? 0.95 : 0.62}
-                strokeWidth={isSel ? 3 : isHov ? 2.2 : 1.1}
+                fillOpacity={layers.demand ? 0.32 : 0.16}
+                stroke={isSel ? "#0f172a" : isHov ? "#f59e0b" : "#ffffff"}
+                strokeOpacity={isSel ? 0.95 : 0.58}
+                strokeWidth={isSel ? 2 : isHov ? 1.6 : 0.8}
                 onMouseEnter={() => setHoveredId(hx.id)}
                 onMouseLeave={() => setHoveredId(null)}
                 onClick={() => onSelect(hx.id)}
-                style={{ cursor: "pointer" }}
+                style={{ cursor: "pointer", transition: "fill-opacity 120ms" }}
               />
             );
           })}
-        </svg>
-      </div>
+        </g>
+      </svg>
 
       {hovered && (
         <div
-          className="absolute pointer-events-none bg-white/95 border border-slate-200 rounded-md px-3 py-2 text-[11px] text-slate-700 shadow-lg z-20"
-          style={{ left: Math.min(tooltipPos.x + 14, 360), top: tooltipPos.y + 14, minWidth: 175 }}
+          className="absolute pointer-events-none bg-white/95 border border-slate-700 rounded-md px-3 py-2 text-[11px] text-slate-100 shadow-xl z-20"
+          style={{ left: Math.min(tooltipPos.x + 14, 10000), top: tooltipPos.y + 14, minWidth: 170 }}
         >
           <div className="text-slate-500 mb-0.5">{hovered.district}</div>
-          <div className="font-semibold text-slate-900 mb-1.5">{hovered.id}</div>
-          <div className="flex justify-between gap-4"><span>Potential Taxi Users</span><span className="tabular-nums font-medium">{formatInt(hovered.potentialTaxiUsers)}</span></div>
-          <div className="flex justify-between gap-4"><span>Demand Index</span><span className="tabular-nums font-medium">{hovered.demandIndex}</span></div>
-          <div className="flex justify-between gap-4"><span>Taxi Probability</span><span className="tabular-nums font-medium">{formatPct(hovered.taxiProbability * 100)}</span></div>
+          <div className="font-semibold text-white mb-1.5">{hovered.id}</div>
+          <div className="flex justify-between gap-4"><span className="text-slate-500">Potential Taxi Users</span><span className="tabular-nums font-medium">{formatInt(hovered.potentialTaxiUsers)}</span></div>
+          <div className="flex justify-between gap-4"><span className="text-slate-500">Demand Index</span><span className="tabular-nums font-medium">{hovered.demandIndex}</span></div>
+          <div className="flex justify-between gap-4"><span className="text-slate-500">Taxi Probability</span><span className="tabular-nums font-medium">{formatPct(hovered.taxiProbability * 100)}</span></div>
         </div>
       )}
 
       <div className="absolute top-3 right-3 flex flex-col bg-white/95 border border-slate-200 rounded-md overflow-hidden z-10 shadow-sm">
-        <button onClick={zoomIn} className="w-9 h-9 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomIn size={15} /></button>
-        <button onClick={zoomOut} className="w-9 h-9 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomOut size={15} /></button>
-        <button onClick={reset} className="w-9 h-9 flex items-center justify-center text-slate-600 hover:bg-slate-50"><RotateCcw size={14} /></button>
+        <button onClick={zoomIn} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomIn size={14} /></button>
+        <button onClick={zoomOut} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomOut size={14} /></button>
+        <button onClick={reset} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50"><RotateCcw size={13} /></button>
       </div>
 
-      <div className="absolute bottom-3 left-3 bg-white/95 border border-slate-200 rounded-md px-2.5 py-2 z-10 shadow-md">
-        <div className="text-[9px] uppercase tracking-wider text-slate-700 font-semibold mb-1.5">Estimated Potential Taxi Users</div>
-        <div className="flex items-center gap-2">
+      <div className="absolute bottom-3 left-3 bg-white/95 border border-slate-200 rounded-md px-3 py-2.5 z-10 shadow-sm">
+        <div className="text-[10px] uppercase tracking-wider text-slate-9000 font-semibold mb-1.5">Estimated Potential Taxi Users</div>
+        <div className="flex items-center gap-2.5">
           {DEMAND_COLORS.map((c, i) => (
-            <div key={c} className="flex flex-col items-center gap-0.5">
-              <div className="w-4 h-2.5 rounded-[1px]" style={{ backgroundColor: c, opacity: 0.58 }} />
-              <span className="text-[8px] text-slate-600 tabular-nums whitespace-nowrap">
+            <div key={c} className="flex flex-col items-center gap-1">
+              <div className="w-5 h-3 rounded-[1px]" style={{ backgroundColor: c, opacity: 0.52 }} />
+              <span className="text-[9px] text-slate-9000 tabular-nums whitespace-nowrap">
                 {i === 0 ? `<${formatInt(thresholds[1])}` : i === 4 ? `>${formatInt(thresholds[4])}` : `${formatInt(thresholds[i])}–${formatInt(thresholds[i + 1])}`}
               </span>
             </div>
           ))}
         </div>
-        <div className="text-[8px] text-slate-500 mt-1">Semi-transparent demand layer · click a hexagon to select</div>
+        <div className="text-[9px] text-slate-500 mt-1.5">Hexagons are semi-transparent to preserve street context.</div>
       </div>
 
-      <div className="absolute bottom-3 right-3 bg-white/90 border border-slate-200 rounded px-2 py-1 text-[9px] text-slate-600 z-10">
+      <div className="absolute bottom-3 right-3 bg-white/90 border border-slate-200 rounded px-2 py-1 text-[9px] text-slate-9000 z-10">
         © OpenStreetMap contributors
       </div>
     </div>
@@ -1086,7 +1086,7 @@ export default function DeltaMobility() {
     if (!match) match = liveHexes.filter((h) => h.district.toLowerCase().includes(query)).sort((a, b) => b.potentialTaxiUsers - a.potentialTaxiUsers)[0];
     if (match) {
       setSelectedId(match.id);
-      setView({ scale: 1.15, tx: 0, ty: 0 });
+      setView({ scale: 1.4, tx: -match.x * 1.4, ty: -match.y * 1.4 });
     }
   }, [liveHexes]);
 
@@ -1102,11 +1102,10 @@ export default function DeltaMobility() {
 
           <div className="flex-1 min-h-0">
         {activeTab === "overview" && (
-          <div className="grid grid-cols-[minmax(0,1fr)_500px] gap-4 p-4 h-full min-h-0">
-            <div className="min-w-0 min-h-0 flex flex-col">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(560px,0.92fr)] gap-4 p-4 h-full min-h-0">
+            <div className="min-w-0 min-h-0 flex">
               <Panel className="flex-1 min-h-0 flex flex-col p-0 overflow-hidden">
-                <MapControlBar layers={layers} setLayers={setLayers} mapStyle={mapStyle} setMapStyle={setMapStyle} onSearch={handleSearch} />
-                <div className="flex-1 min-h-0 min-w-0">
+                <div className="flex-1 min-h-0">
                   <MapView
                     hexes={liveHexes}
                     selectedId={selectedId}
@@ -1114,6 +1113,8 @@ export default function DeltaMobility() {
                     hoveredId={hoveredId}
                     setHoveredId={setHoveredId}
                     layers={layers}
+                    mapStyle={mapStyle}
+                    bounds={bounds}
                     view={view}
                     setView={setView}
                     tooltipPos={tooltipPos}
@@ -1123,7 +1124,7 @@ export default function DeltaMobility() {
               </Panel>
             </div>
 
-            <div className="flex flex-col gap-3 min-h-0 overflow-y-auto pr-1">
+            <div className="flex flex-col gap-3 min-h-0 overflow-y-auto pr-0.5">
               <div className="grid grid-cols-2 gap-3 shrink-0">
                 {selectedHex ? (
                   <>
@@ -1134,10 +1135,10 @@ export default function DeltaMobility() {
                   </>
                 ) : (
                   <>
-                    <KPICard label="Potential Taxi Users" value={formatNumber(cityAvg.totalPotentialTaxiUsers)} sub={`${hour}:00 ${period.toLowerCase()} estimate`} icon={Users} />
-                    <KPICard label="Demand Index" value="100" sub="Jakarta baseline" icon={TrendingUp} />
-                    <KPICard label="Taxi Probability" value={formatPct(cityAvg.taxiProbability * 100)} sub="Estimated probability of using taxi" icon={Car} />
-                    <KPICard label="Avg. Home Distance" value={formatKm(cityAvg.homeDistance)} sub="Across analysed zones" icon={Navigation} />
+                    <KPICard label="Estimated Potential Taxi Users" value={formatNumber(cityAvg.totalPotentialTaxiUsers)} sub={`${hour}:00 ${period.toLowerCase()} estimate`} icon={Users} />
+                    <KPICard label="Average Demand Index" value="100" sub="Jakarta baseline" icon={TrendingUp} />
+                    <KPICard label="Average Taxi Probability" value={formatPct(cityAvg.taxiProbability * 100)} sub="Estimated probability of using taxi" icon={Car} />
+                    <KPICard label="Average Homebound Distance" value={formatKm(cityAvg.homeDistance)} sub="Across analysed zones" icon={Navigation} />
                   </>
                 )}
               </div>
@@ -1215,6 +1216,7 @@ export default function DeltaMobility() {
         {activeTab === "mobility" && <MobilityTab hex={selectedHex} cityAvg={cityAvg} />}
         {activeTab === "demographics" && <DemographicsTab hex={selectedHex} cityAvg={cityAvg} />}
       </div>
+
           </main>
         </div>
       </div>
