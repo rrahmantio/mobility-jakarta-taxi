@@ -1225,6 +1225,5 @@ export default function DeltaMobility() {
           </main>
         </div>
       </div>
-    </div>
   );
 }
