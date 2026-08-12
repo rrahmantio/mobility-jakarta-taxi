@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useCallback } from "react";
+import React, { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import {
   MapPin, ZoomIn, ZoomOut, RotateCcw, Layers, Search, Info, TrendingUp,
   TrendingDown, Clock, ChevronRight, X, Navigation, Car, Users, AlertCircle,
@@ -341,17 +341,87 @@ function DistBar({ rows, compareRows, unit = "%" }) {
    ============================================================ */
 function MapView({
   hexes, selectedId, onSelect, hoveredId, setHoveredId, layers,
-  bounds, view, setView, tooltipPos, setTooltipPos,
+  view, setView, tooltipPos, setTooltipPos,
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
+  const [viewport, setViewport] = useState({ width: 1000, height: 940 });
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const update = () => {
+      const rect = containerRef.current.getBoundingClientRect();
+      setViewport({ width: Math.max(320, rect.width), height: Math.max(320, rect.height) });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   const values = hexes.map((h) => h.potentialTaxiUsers);
   const thresholds = useMemo(() => quantileThresholds(values), [hexes]);
 
-  // Jakarta-area geographic extent. Hex coordinates are mapped into this
-  // extent so the analytical grid sits directly over the OSM basemap.
-  const GEO = { west: 106.62, east: 107.08, north: -6.05, south: -6.48 };
+  /*
+   * IMPORTANT: the basemap tiles and the analytical hex layer now live inside
+   * ONE transformed "world" layer. They therefore pan and zoom together at
+   * exactly the same rate. The previous implementation rendered them in two
+   * different coordinate systems, which caused the overlay to drift.
+   *
+   * The geographic window is deliberately centred on Jakarta and the top of
+   * the analytical grid is anchored around the North Jakarta coastline.
+   */
+  const GEO = { west: 106.70, east: 107.02, north: -6.10, south: -6.42 };
+  const WORLD_W = 1000;
+  const WORLD_H = 940;
+  const fitScale = Math.min(viewport.width / WORLD_W, viewport.height / WORLD_H);
+  const renderScale = fitScale * view.scale;
+  const tileZoom = 11;
+  const tileSize = 256;
+
+  const lonToWorldX = (lon) => ((lon + 180) / 360) * Math.pow(2, tileZoom) * tileSize;
+  const latToWorldY = (lat) => {
+    const rad = (lat * Math.PI) / 180;
+    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, tileZoom) * tileSize;
+  };
+
+  const westWX = lonToWorldX(GEO.west);
+  const eastWX = lonToWorldX(GEO.east);
+  const northWY = latToWorldY(GEO.north);
+  const southWY = latToWorldY(GEO.south);
+  const pxPerWorldX = WORLD_W / (eastWX - westWX);
+  const pxPerWorldY = WORLD_H / (southWY - northWY);
+
+  const geoToPixel = (lon, lat) => ({
+    x: (lonToWorldX(lon) - westWX) * pxPerWorldX,
+    y: (latToWorldY(lat) - northWY) * pxPerWorldY,
+  });
+
+  // Approximate Jakarta coastline. Hexes whose centres are north of this
+  // boundary are hidden so the analytical demand layer does not appear in
+  // Jakarta Bay. This is only a visual land-mask for the simulated grid.
+  const coastlineLat = (lon) => {
+    const points = [
+      [106.70, -6.13], [106.76, -6.125], [106.82, -6.115],
+      [106.88, -6.11], [106.94, -6.115], [107.00, -6.105], [107.02, -6.11],
+    ];
+    for (let i = 0; i < points.length - 1; i++) {
+      const [x1, y1] = points[i], [x2, y2] = points[i + 1];
+      if (lon >= x1 && lon <= x2) {
+        const t = (lon - x1) / (x2 - x1);
+        return y1 + (y2 - y1) * t;
+      }
+    }
+    return -6.12;
+  };
+
+  const isLandHex = (hx) => {
+    const gx = (hx.x - bounds.minX) / (bounds.maxX - bounds.minX);
+    const gy = (hx.y - bounds.minY) / (bounds.maxY - bounds.minY);
+    const lon = GEO.west + gx * (GEO.east - GEO.west);
+    const lat = GEO.north + gy * (GEO.south - GEO.north);
+    return lat >= coastlineLat(lon);
+  };
 
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -371,73 +441,39 @@ function MapView({
 
   const onMouseUp = () => { dragRef.current = null; };
 
-  const zoomIn = () => setView((v) => ({ ...v, scale: clamp(v.scale * 1.25, 0.7, 3.5) }));
-  const zoomOut = () => setView((v) => ({ ...v, scale: clamp(v.scale / 1.25, 0.7, 3.5) }));
+  const zoomIn = () => setView((v) => ({ ...v, scale: clamp(v.scale * 1.25, 0.75, 3.5) }));
+  const zoomOut = () => setView((v) => ({ ...v, scale: clamp(v.scale / 1.25, 0.75, 3.5) }));
   const reset = () => setView({ scale: 1, tx: 0, ty: 0 });
 
-  const w = bounds.maxX - bounds.minX, h2 = bounds.maxY - bounds.minY;
-  const vb = `${bounds.minX} ${bounds.minY} ${w} ${h2}`;
   const hovered = hexes.find((x) => x.id === hoveredId);
 
-  // Keep the basemap and SVG in exactly the same local coordinate system.
-  // OSM is displayed as a tile mosaic underneath; the analytical SVG is
-  // projected over the same Jakarta bounding box.
-  const tileZoom = 11;
-  const tileSize = 256;
-
-  const lon2x = (lon) => ((lon - GEO.west) / (GEO.east - GEO.west)) * w + bounds.minX;
-  const lat2y = (lat) => ((GEO.north - lat) / (GEO.north - GEO.south)) * h2 + bounds.minY;
-
-  // Web Mercator tile conversion for a lightweight OSM tile mosaic.
-  const lonToWorldX = (lon, z) => ((lon + 180) / 360) * Math.pow(2, z) * tileSize;
-  const latToWorldY = (lat, z) => {
-    const rad = (lat * Math.PI) / 180;
-    return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, z) * tileSize;
-  };
-
-  const centerLon = (GEO.west + GEO.east) / 2;
-  const centerLat = (GEO.north + GEO.south) / 2;
-  const centerWX = lonToWorldX(centerLon, tileZoom);
-  const centerWY = latToWorldY(centerLat, tileZoom);
-
-  const tileSpan = Math.max(w, h2) * 1.35;
-  const tileWorldW = tileSpan * 1.15;
-  const tileWorldH = tileSpan * 1.15;
-  const startWX = centerWX - tileWorldW / 2;
-  const startWY = centerWY - tileWorldH / 2;
-  const endWX = centerWX + tileWorldW / 2;
-  const endWY = centerWY + tileWorldH / 2;
-  const minTX = Math.floor(startWX / tileSize) - 1;
-  const maxTX = Math.ceil(endWX / tileSize) + 1;
-  const minTY = Math.floor(startWY / tileSize) - 1;
-  const maxTY = Math.ceil(endWY / tileSize) + 1;
   const tiles = [];
-
+  const minTX = Math.floor(westWX / tileSize) - 1;
+  const maxTX = Math.ceil(eastWX / tileSize) + 1;
+  const minTY = Math.floor(northWY / tileSize) - 1;
+  const maxTY = Math.ceil(southWY / tileSize) + 1;
+  const tileCount = Math.pow(2, tileZoom);
   for (let tx = minTX; tx <= maxTX; tx++) {
     for (let ty = minTY; ty <= maxTY; ty++) {
-      const n = Math.pow(2, tileZoom);
-      const wrappedX = ((tx % n) + n) % n;
+      const wrappedX = ((tx % tileCount) + tileCount) % tileCount;
       tiles.push({
         key: `${tx}-${ty}`,
-        x: (tx * tileSize - centerWX) / w * w + (w / 2),
-        y: (ty * tileSize - centerWY) / h2 * h2 + (h2 / 2),
+        x: (tx * tileSize - westWX) * pxPerWorldX,
+        y: (ty * tileSize - northWY) * pxPerWorldY,
+        width: tileSize * pxPerWorldX,
+        height: tileSize * pxPerWorldY,
         src: `https://tile.openstreetmap.org/${tileZoom}/${wrappedX}/${ty}.png`,
       });
     }
   }
 
-  const geoHexes = hexes.map((hx) => {
-    // The existing analytical grid is normalized into the Jakarta geographic
-    // extent. This keeps the user's existing demand model while aligning it
-    // visually with the actual street geography.
-    const gx = ((hx.x - bounds.minX) / w);
-    const gy = ((hx.y - bounds.minY) / h2);
-    return {
-      ...hx,
-      mapX: bounds.minX + gx * w,
-      mapY: bounds.minY + gy * h2,
-    };
-  });
+  const hexesInGeo = hexes
+    .filter(isLandHex)
+    .map((hx) => {
+      const gx = (hx.x - bounds.minX) / (bounds.maxX - bounds.minX);
+      const gy = (hx.y - bounds.minY) / (bounds.maxY - bounds.minY);
+      return { ...hx, mapX: gx * WORLD_W, mapY: gy * WORLD_H };
+    });
 
   return (
     <div
@@ -448,22 +484,17 @@ function MapView({
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
     >
-      {/* OpenStreetMap basemap */}
+      {/* One world layer = basemap + hex overlay. Never transform them separately. */}
       <div
-        className="absolute inset-0 overflow-hidden"
-        style={{ background: "#e8edf2" }}
+        className="absolute left-1/2 top-1/2"
+        style={{
+          width: `${WORLD_W}px`,
+          height: `${WORLD_H}px`,
+          transform: `translate(-50%, -50%) translate(${view.tx}px, ${view.ty}px) scale(${renderScale})`,
+          transformOrigin: "center center",
+        }}
       >
-        <div
-          className="absolute"
-          style={{
-            left: "50%",
-            top: "50%",
-            width: `${w}px`,
-            height: `${h2}px`,
-            transform: `translate(-50%, -50%) translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
-            transformOrigin: "center center",
-          }}
-        >
+        <div className="absolute inset-0 bg-slate-100 overflow-hidden">
           {tiles.map((tile) => (
             <img
               key={tile.key}
@@ -474,28 +505,22 @@ function MapView({
               style={{
                 left: `${tile.x}px`,
                 top: `${tile.y}px`,
-                width: `${tileSize}px`,
-                height: `${tileSize}px`,
+                width: `${tile.width}px`,
+                height: `${tile.height}px`,
                 opacity: 0.92,
               }}
               onError={(e) => { e.currentTarget.style.display = "none"; }}
             />
           ))}
+          <div className="absolute inset-0 bg-white/10 pointer-events-none" />
         </div>
-        <div className="absolute inset-0 bg-white/10 pointer-events-none" />
-      </div>
 
-      {/* Hexagonal demand overlay */}
-      <svg
-        viewBox={vb}
-        className="absolute inset-0 w-full h-full pointer-events-none"
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <g
-          transform={`translate(${view.tx} ${view.ty + 147}) scale(${view.scale})`}
-          className="pointer-events-auto"
+        <svg
+          viewBox={`0 0 ${WORLD_W} ${WORLD_H}`}
+          className="absolute inset-0 w-full h-full"
+          preserveAspectRatio="none"
         >
-          {layers.hex && geoHexes.map((hx) => {
+          {layers.hex && hexesInGeo.map((hx) => {
             const bIdx = bucketIndex(hx.potentialTaxiUsers, thresholds);
             const fill = layers.demand ? DEMAND_COLORS[bIdx] : "#64748b";
             const isSel = hx.id === selectedId;
@@ -503,7 +528,7 @@ function MapView({
             return (
               <polygon
                 key={hx.id}
-                points={hexPoints(hx.mapX, hx.mapY, 13.09)}
+                points={hexPoints(hx.mapX, hx.mapY, 29)}
                 fill={fill}
                 fillOpacity={layers.demand ? 0.32 : 0.16}
                 stroke={isSel ? "#0f172a" : isHov ? "#f59e0b" : "#ffffff"}
@@ -516,8 +541,8 @@ function MapView({
               />
             );
           })}
-        </g>
-      </svg>
+        </svg>
+      </div>
 
       {hovered && (
         <div
@@ -532,7 +557,10 @@ function MapView({
         </div>
       )}
 
-      <div className="absolute top-3 right-3 flex flex-col bg-white/95 border border-slate-200 rounded-md overflow-hidden z-10 shadow-sm">
+      <div
+        className="absolute top-3 right-3 flex flex-col bg-white/95 border border-slate-200 rounded-md overflow-hidden z-10 shadow-sm"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <button onClick={zoomIn} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomIn size={14} /></button>
         <button onClick={zoomOut} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50 border-b border-slate-200"><ZoomOut size={14} /></button>
         <button onClick={reset} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:bg-slate-50"><RotateCcw size={13} /></button>
@@ -559,7 +587,6 @@ function MapView({
     </div>
   );
 }
-
 /* ============================================================
    MAP CONTROL BAR (layers, style, search)
    ============================================================ */
@@ -1086,7 +1113,7 @@ export default function DeltaMobility() {
     if (!match) match = liveHexes.filter((h) => h.district.toLowerCase().includes(query)).sort((a, b) => b.potentialTaxiUsers - a.potentialTaxiUsers)[0];
     if (match) {
       setSelectedId(match.id);
-      setView({ scale: 1.4, tx: -match.x * 1.4, ty: -match.y * 1.4 });
+      setView({ scale: 1, tx: 0, ty: 0 });
     }
   }, [liveHexes]);
 
